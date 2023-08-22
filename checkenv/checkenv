@@ -1,0 +1,423 @@
+#!/usr/bin/env python3
+"""A script to check for changes in .env files against the sample"""
+from __future__ import annotations
+
+import os
+from argparse import ArgumentParser
+from typing import Literal, NamedTuple, Optional, Sequence, TypeVar, cast
+
+# TODO(alvaro): Add support for checking a single file
+# TODO(alvaro): prettier error handling
+# TODO(alvaro): support for checking for different values
+# TODO(alvaro): some type of syntax for checking if a value is missing
+# TODO(alvaro): support for other configuration formats (.yaml, .toml, .json)
+
+
+# TODO(alvaro): Rename contents into stream
+# TODO(alvaro): Move to a cursor based parser so that we can reference the original
+# content at any time
+# FIXME(alvaro): Make the parser more efficient avoiding unnecessary content
+# copies
+# Parser
+
+Quote = Literal["'", '"']
+
+COMMENT_CHAR = "#"
+SEPARATOR = "="
+
+T = TypeVar("T")
+
+
+class ContentLine(NamedTuple):
+    """Line of content in the `.env` file"""
+
+    line: int  # 1-based
+    end_line: int  # 1-based
+    content: str
+    key: str
+    value: str
+
+
+class ParseError(Exception):
+    """An error found while parsing an `.env` file"""
+
+    pass
+
+
+def is_whitespace(char: str) -> bool:
+    return char == "\t" and char == " "
+
+
+def is_newline(char: str) -> bool:
+    return char == "\n"
+
+
+def skip_whitespace(contents: str) -> str:
+    assert len(contents) > 0
+
+    if not is_whitespace(contents[0]):
+        return contents
+
+    # Remove the whitespace
+    for i, c in enumerate(contents):
+        if not is_whitespace(c):
+            return contents[i:]
+    return ""
+
+
+def strip_inline_comment(contents: str) -> str:
+    """Strip the inline comments at the end of the content stream"""
+    comment_pos = find_unquoted_char_in_line(contents, COMMENT_CHAR)
+    if comment_pos is None:
+        return contents
+    return contents[:comment_pos]
+
+
+def find_char_in_line(contents: str, char: str) -> Optional[int]:
+    for i, c in enumerate(contents):
+        if c == char:
+            return i
+        elif c == "\n":
+            # We got to the end of the line
+            return None
+    return None
+
+
+def find_unquoted_char(contents: str, char: str) -> tuple[Optional[int], int]:
+    """Find the position of the next instance of `char` that is not quoted
+    with a '\' character.
+    Returns the position and the number of lines skipped
+    """
+    newlines = 0
+    quoted = False
+    for i, c in enumerate(contents):
+        if c == char and not quoted:
+            return i, newlines
+
+        if quoted:
+            quoted = False
+            continue
+
+        if c == "\\":
+            quoted = True
+        elif c == "\n":
+            newlines += 1
+
+    # Not found
+    return None, newlines
+
+
+def find_unquoted_char_in_line(contents: str, char: str) -> Optional[int]:
+    """Find the position of the next instance of `char` that is not quoted
+    with a '\' character in the same line
+    """
+    pos, newlines = find_unquoted_char(contents, char)
+    return pos if newlines == 0 else None
+
+
+def find_newline(contents: str) -> Optional[int]:
+    for i, c in enumerate(contents):
+        if c == "\n":
+            return i
+    return None
+
+
+def skip_newline(contents: str, line: int) -> tuple[str, int]:
+    assert len(contents) > 0
+    assert contents[0] == "\n"
+
+    return contents[1:], line + 1
+
+
+def consume_line(
+    contents: str, line: int, skip_comment: bool = True
+) -> tuple[str, str, int]:
+    newline_pos = find_newline(contents)
+    if newline_pos is None:
+        # this is the last line
+        value = strip_inline_comment(contents) if skip_comment else contents
+        return value, "", line
+    assert newline_pos < len(contents)
+    consumed = contents[:newline_pos]
+    new_contents, new_line = skip_newline(contents[newline_pos:], line)
+    value = strip_inline_comment(consumed) if skip_comment else consumed
+    return value, new_contents, new_line
+
+
+def consume_char(contents: str, char: str) -> str:
+    assert len(contents) > 0
+    assert contents[0] == char
+    return contents[1:]
+
+
+def consume_n_chars(contents: str, n: int) -> tuple[str, str]:
+    assert len(contents) >= n
+    return contents[:n], contents[n:]
+
+
+def consume_key(contents: str, line: int) -> tuple[str, str]:
+    assert len(contents) > 0
+    # We have a value line, parse it
+    sep_position = find_char_in_line(contents, SEPARATOR)
+    if sep_position is None:
+        raise ParseError(f"no separator found on L{line}")
+
+    raw_key, contents = consume_n_chars(contents, sep_position)
+    key = raw_key.strip()
+    if not key:
+        raise ParseError(f"empty key found on L{line}")
+    return key, contents
+
+
+def consume_value(contents: str, line: int) -> tuple[str, str, int]:
+    """Consume a .env value
+    Returns the value, the remaining contents and the line after consuming"""
+    assert len(contents) > 0
+    # Skip whitespace
+    contents = skip_whitespace(contents)
+    if not contents:
+        raise ParseError(f"no value found on L{line}")
+
+    head = contents[0]
+    if head == '"' or head == "'":
+        return consume_quoted_value(contents, line, quote=cast(Quote, head))
+    else:
+        return consume_unquoted_value(contents, line)
+
+
+def consume_unquoted_value(contents: str, line: int) -> tuple[str, str, int]:
+    """Consume an unquoted value from the contents stream"""
+    # Consume anything until newline or comment
+    raw_value, new_contents, new_line = consume_line(contents, line, skip_comment=True)
+    value = raw_value.strip()
+    return value, new_contents, new_line
+
+
+def consume_quoted_value(
+    contents: str, line: int, quote: Quote
+) -> tuple[str, str, int]:
+    """Consume a quoted value from the contents stream.
+    This can span multiple lines"""
+    assert contents[0] == quote
+
+    # Skip the first quote
+    contents = contents[1:]
+
+    # Find the position of the end quote marker
+    end_quote_pos, newlines = find_unquoted_char(contents, char=quote)
+    new_line = line + newlines
+    if end_quote_pos is None:
+        if newlines == 0:
+            raise ParseError(f"quoted value not closed on L{line}")
+        else:
+            raise ParseError(f"quoted value not closed on L{line}-{new_line}")
+    value = contents[:end_quote_pos]
+
+    contents = contents[end_quote_pos + 1 :]
+    # Consume any content that may exist after a comment
+    # FIXME(alvaro): Validate that this is valid and not garbage content
+    #   e.g: key="value" some garbage here # this is a comment
+    _, new_contents, new_line = consume_line(contents, new_line, skip_comment=True)
+    return value, new_contents, new_line
+
+
+def parse_env_line(contents: str, line: int) -> tuple[str, int, Optional[ContentLine]]:
+    """Parse a line of the `.env` format, returning the remaining contents, the
+    current line and the content parsed (if any)
+
+    Note that a line of this format may span multiple lines in the file (i.e:
+    with a multiline string value)
+    """
+    assert len(contents) > 0
+    original_length = len(contents)
+
+    # Strip whitespace
+    contents = skip_whitespace(contents)
+    if not contents:
+        # Done parsing
+        return contents, line, None
+
+    head = contents[0]
+    # Check if the line was just whitespace
+    if head == "\n":
+        new_contents, new_line = skip_newline(contents, line)
+        return new_contents, new_line, None
+    elif head == COMMENT_CHAR:
+        # This is a line comment
+        _, new_contents, new_line = consume_line(contents, line, skip_comment=True)
+        return new_contents, new_line, None
+
+    assert len(contents) > 0
+
+    key, contents = consume_key(contents, line)
+    contents = consume_char(contents, SEPARATOR)
+    value, contents, new_line = consume_value(contents, line)
+    # Consume the last newline
+    if len(contents) > 0 and is_newline(contents[0]):
+        contents, new_line = skip_newline(contents, new_line)
+    # TODO(alvaro): Add the raw contents of the line here (when we move to a
+    # cursor
+    # based parser)
+    content_line = ContentLine(
+        line=line,
+        end_line=new_line,
+        content="",
+        key=key,
+        value=value,
+    )
+    if len(contents) == original_length:
+        raise RuntimeError("nothing was consumed after parsing env line")
+    return contents, new_line, content_line
+
+
+def load_env(path: str) -> list[ContentLine]:
+    """Load the values from a `.env` file.
+    Returns a list of content lines
+    """
+
+    with open(path, "r") as f:
+        stream = f.read()
+
+    content_lines = []
+    line = 1
+    while len(stream) > 0:
+        new_stream, new_line, content_line = parse_env_line(stream, line)
+        if content_line is not None:
+            content_lines.append(content_line)
+        stream = new_stream
+        line = new_line
+
+    return content_lines
+
+
+def compare_lists(
+    left: list[str], right: list[str]
+) -> tuple[bool, list[str], list[str]]:
+    """Compare two lists and if there are any differences, return `True`
+    and a list of the missing items in left (present on right and not on left)
+    and viceversa
+    """
+    left_set = set(left)
+    right_set = set(right)
+
+    if left_set == right_set:
+        return False, [], []
+
+    # There are some differences, compute them
+    left_missing = list(right_set - left_set)
+    right_missing = list(left_set - right_set)
+    return True, left_missing, right_missing
+
+
+def list_duplicates(lst: Sequence[T]) -> list[T]:
+    """Check if `lst` has duplicated elements, returning the duplicated values (once
+    per unique value)"""
+    dups = []  # This is a list so that we maintain original order
+    seen = set()
+    for val in lst:
+        if val in seen:
+            # The value is duplicated
+            if val not in dups:
+                dups.append(val)
+        else:
+            seen.add(val)
+    return dups
+
+
+def check_duplicate_keys(
+    env_contents: list[ContentLine],
+    sample_contents: list[ContentLine],
+    env_file: str,
+    sample_file: str,
+) -> bool:
+    """Check for duplicate keys in the existing keys in the .env file.
+    Returns `True` if the checks passed"""
+
+    sample_dups = list_duplicates([c.key for c in sample_contents])
+    env_dups = list_duplicates([c.key for c in env_contents])
+
+    if sample_dups:
+        pretty_dups = ", ".join([repr(key) for key in sample_dups])
+        print(f"{sample_file} contains duplicated keys: {pretty_dups}")
+    if env_dups:
+        pretty_dups = ", ".join([repr(key) for key in env_dups])
+        print(f"{env_file} contains duplicated keys: {pretty_dups}")
+
+    return len(sample_dups) == 0 and len(env_dups) == 0
+
+
+def check_existing_keys(
+    env_contents: list[ContentLine], sample_contents: list[ContentLine], env_file: str
+) -> bool:
+    """Check for missing or unexpected keys in the existing keys in the .env file.
+    Returns `True` if the checks passed"""
+    env_dict = {c.key: c.value for c in env_contents}
+    sample_dict = {c.key: c.value for c in sample_contents}
+    env_keys = list(sorted(env_dict.keys()))
+    sample_keys = list(sorted(sample_dict.keys()))
+
+    different, left_missing, right_missing = compare_lists(env_keys, sample_keys)
+    if different:
+        if left_missing:
+            pretty_missing = ", ".join([repr(key) for key in left_missing])
+            print(f"{env_file} is missing the following keys: {pretty_missing}")
+
+        if right_missing:
+            pretty_missing = ", ".join([repr(key) for key in right_missing])
+            print(f"{env_file} has the following unknown keys: {pretty_missing}")
+        return False
+    return True
+
+
+def perform_checks(
+    env_contents: list[ContentLine],
+    sample_contents: list[ContentLine],
+    env_file: str,
+    sample_file: str,
+) -> bool:
+    """Perform the requested checks on the .env content lines and return `True`
+    if all the checks passed"""
+
+    # TODO(alvaro): Add line number to these reports
+    # Check for duplicate keys
+    dup_ok = check_duplicate_keys(env_contents, sample_contents, env_file, sample_file)
+    existing_ok = check_existing_keys(env_contents, sample_contents, env_file)
+
+    return dup_ok and existing_ok
+
+
+def main() -> int:
+    parser = ArgumentParser(
+        description="check for changes in .env files agains a sample"
+    )
+    parser.add_argument("file", help="path to the .env file to check")
+    parser.add_argument("sample", help="path to the .env.sample file to check")
+
+    args = parser.parse_args()
+
+    env_file = args.file
+    env_sample = args.sample
+
+    if not os.path.exists(env_file):
+        print(f".env file not found at {env_file!r}")
+        return 1
+
+    if not os.path.exists(env_sample):
+        print(f".env sample file not found at {env_sample!r}")
+        return 1
+
+    env_contents = load_env(env_file)
+    sample_contents = load_env(env_sample)
+    content_ok = perform_checks(env_contents, sample_contents, env_file, env_sample)
+
+    if content_ok:
+        print(f"{env_file} matches {env_sample}")
+        return 0
+    else:
+        return 1
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
