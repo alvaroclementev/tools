@@ -1,0 +1,72 @@
+#!/usr/bin/env python3
+import http.client
+import json
+import os
+import sys
+
+SYSTEM_PROMPT = """
+You are a helpful assistant that is an expert software engineer. You answer with a VERY BRIEF explanation summarized in a single paragraph, and small code examples if relevant to the question surrounded in block quotes with the name of the programming language like in Github flavored markdown.
+If you don't know the answer to something, you respond with "I don't know". If the code is self explanatory in the context of the question, you don't include a text explanation unless explicitly requested.
+Assume every question starts with "How to" and ends with a question mark "?".
+Some examples are:
+---
+Question: make an http request in Python
+Answer: To make a request in Python you can use the `requests` library:
+```python
+import requests
+requests.get('https://example.com')
+```
+---
+Question: build a workflow with foobar
+Answer: I don't know
+---"""
+
+
+def error(*args):
+    print(*args, file=sys.stderr)
+
+
+def main() -> int:
+    openai_key = os.environ.get("OPENAI_API_KEY")
+    if not openai_key:
+        error("error: no OpenAI API key found. Set OPENAI_API_KEY env variable")
+        return 1
+
+    conn = http.client.HTTPSConnection("api.openai.com")
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {openai_key}",
+    }
+    user_input = " ".join(sys.argv[1:])
+    body = {
+        "model": "gpt-3.5-turbo",
+        "messages": [
+            {
+                "role": "system",
+                "content": SYSTEM_PROMPT,
+            },
+            {
+                "role": "user",
+                "content": user_input,
+            },
+        ],
+        "temperature": 0.7,
+        "max_tokens": 128,
+        "top_p": 1,
+        "frequency_penalty": 0.1,
+    }
+    conn.request("POST", "/v1/chat/completions", body=json.dumps(body), headers=headers)
+    response = conn.getresponse()
+    if response.status == 200:
+        response_data = json.load(response)
+        content = response_data["choices"][0]["message"]["content"]
+        print(content)
+        return 0
+    else:
+        response_data = response.read().decode("utf-8")
+        error("error: ", response_data)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
