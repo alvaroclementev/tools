@@ -5,7 +5,12 @@ Set of tools for personal use
 
 ## Installing tools
 
-Each tool should contain a install script, that would symlink the right binary(ies) 
-into the `bin/` directory at the top level of this repo.
+For basic tools (single executable file) you can use the `install` script at 
+the top level, which will create a symlink to the file in the `bin/` directory
+in this repo. For instance
 
-You can then add this `bin/` directory to your `$PATH`.
+```sh
+./install howto
+```
+
+You can then add this `bin/` directory to your `$PATH` and every tool will be available.

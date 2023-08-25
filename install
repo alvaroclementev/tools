@@ -1,0 +1,24 @@
+#!/bin/sh
+
+usage() {
+    echo "usage: howto <tool-name>"
+}
+
+if [ -z "$1" ]; then
+    usage
+    exit 1
+fi
+
+TOOL_NAME="$1"
+REPO_BASE=$(git rev-parse --show-toplevel)
+BIN_PATH="$REPO_BASE/bin"
+TOOL_PATH="$REPO_BASE/$TOOL_NAME/$TOOL_NAME" 
+
+if [ ! -f "$TOOL_PATH" ]; then
+    echo "error: $TOOL_NAME does not exist"
+    usage
+    exit 1
+fi
+
+# Actually install the tool
+ln -sf "$TOOL_PATH" "$BIN_PATH/$TOOL_NAME" && echo "installed $TOOL_NAME" || echo "failed to install $TOOL_NAME"
