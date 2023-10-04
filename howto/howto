@@ -3,6 +3,7 @@ import http.client
 import json
 import os
 import sys
+import argparse
 
 SYSTEM_PROMPT = """
 You are a helpful assistant that is an expert software engineer. You answer with a VERY BRIEF explanation summarized in a single paragraph, and small code examples if relevant to the question surrounded in block quotes with the name of the programming language like in Github flavored markdown.
@@ -21,12 +22,19 @@ Question: build a workflow with foobar
 Answer: I don't know
 ---"""
 
+DEFAULT_MAX_TOKENS = 128
+DEFAULT_TEMPERATURE = 0.7
+
 
 def error(*args):
     print(*args, file=sys.stderr)
 
 
-def main() -> int:
+def main(question: str, max_tokens: int, temperature: float) -> int:
+    if not 0 < temperature < 1:
+        print("error: temperature must be a number between 0 and 1")
+        return 1
+
     openai_key = os.environ.get("OPENAI_API_KEY")
     if not openai_key:
         error("error: no OpenAI API key found. Set OPENAI_API_KEY env variable")
@@ -37,7 +45,6 @@ def main() -> int:
         "Content-Type": "application/json",
         "Authorization": f"Bearer {openai_key}",
     }
-    user_input = " ".join(sys.argv[1:])
     body = {
         "model": "gpt-3.5-turbo",
         "messages": [
@@ -47,11 +54,11 @@ def main() -> int:
             },
             {
                 "role": "user",
-                "content": user_input,
+                "content": question,
             },
         ],
         "temperature": 0.7,
-        "max_tokens": 128,
+        "max_tokens": max_tokens,
         "top_p": 1,
         "frequency_penalty": 0.1,
     }
@@ -69,4 +76,22 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    parser = argparse.ArgumentParser(description="ask ChatGPT how to perform some task")
+    parser.add_argument("question", help="question to ask", nargs="+")
+    parser.add_argument(
+        "-m",
+        "--max-tokens",
+        help="maximum number of tokens",
+        type=int,
+        default=DEFAULT_MAX_TOKENS,
+    )
+    parser.add_argument(
+        "-t",
+        "--temperature",
+        help="temperature of the prediction",
+        type=float,
+        default=DEFAULT_TEMPERATURE,
+    )
+    args = parser.parse_args()
+    question = " ".join(args.question)
+    raise SystemExit(main(question, args.max_tokens, args.temperature))
