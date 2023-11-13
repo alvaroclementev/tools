@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
+import argparse
 import http.client
 import json
 import os
 import sys
-import argparse
 
 SYSTEM_PROMPT = """
 You are a helpful assistant that is an expert software engineer. You answer with a VERY BRIEF explanation summarized in a single paragraph, and small code examples if relevant to the question surrounded in block quotes with the name of the programming language like in Github flavored markdown.
@@ -24,6 +24,7 @@ Answer: I don't know
 
 DEFAULT_MAX_TOKENS = 128
 DEFAULT_TEMPERATURE = 0.7
+DEFAULT_MODEL = "gpt-3.5-turbo-1106"
 
 
 def error(*args):
@@ -46,7 +47,7 @@ def main(question: str, max_tokens: int, temperature: float) -> int:
         "Authorization": f"Bearer {openai_key}",
     }
     body = {
-        "model": "gpt-3.5-turbo",
+        "model": DEFAULT_MODEL,
         "messages": [
             {
                 "role": "system",
